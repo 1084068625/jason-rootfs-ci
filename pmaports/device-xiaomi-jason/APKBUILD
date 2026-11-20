@@ -21,8 +21,12 @@ depends="
 	postmarketos-base
 	soc-qcom-sdm660
 	soc-qcom-sdm660-rproc
-	usb-network-jason
 "
+
+# 注意：没有依赖 usb-network-jason。
+# 该包里的服务全是 systemd unit，只适用于 systemd 通道（systemd-edge）；
+# 当前镜像走 OpenRC 通道，USB 联网用 pmOS 自带实现（默认 172.16.42.1），
+# 更稳、冲突更少。等系统跑通后若确实需要，再补 OpenRC 版服务脚本。
 
 makedepends="devicepkg-dev"
 
