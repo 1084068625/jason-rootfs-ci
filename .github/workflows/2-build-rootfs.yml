@@ -108,13 +108,18 @@ jobs:
           echo "--- 官方内核包版本 ---"
           grep -E "^pkgver=" "$P/device/testing/linux-postmarketos-qcom-sdm660/APKBUILD" || true
 
-      - name: 7. 设置设备与界面
+      - name: 7. 设置设备、界面与 init 系统
         run: |
           pmbootstrap config device "$DEVICE"
           pmbootstrap config ui "${{ inputs.ui }}"
+          # 明确用 OpenRC：pmOS 的 systemd 走独立仓库（systemd-edge），
+          # 实测在 CI 里装 systemd 包会报 apk commit 失败；OpenRC 通道最稳。
+          pmbootstrap config service_manager openrc
           pmbootstrap config build_pkgs_on_install true
           echo "--- 最终配置 ---"
           pmbootstrap config
+          echo "--- 复核（新进程读取，确认落到 openrc）---"
+          pmbootstrap config service_manager
 
       - name: 8. 计算包校验值
         run: |
