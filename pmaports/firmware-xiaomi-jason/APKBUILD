@@ -1,0 +1,57 @@
+# Firmware package for Xiaomi Mi Note 3 (jason), sdm660 / WCN3990 / Adreno 512
+#
+# 结构对照官方 firmware-xiaomi-lavender / -whyred（同为 sdm660），
+# 保证在最新 pmaports 上的行为可预期：
+#   1. ath10k/WCN3990/hw1.0/firmware-5.bin  —— WiFi 固件（由 qca-swiss-army-knife 现场生成）
+#   2. ath10k/WCN3990/hw1.0/board.bin       —— WiFi 板级数据（从原厂 bdwlan.bin 提取）
+#   3. postmarketos/a512_zap.mbn            —— Adreno 512 的 zap 着色器（GPU 初始化用，
+#                                              官方三个 sdm660 设备都装，缺了 GPU 起不来）
+maintainer="jason port <port@example.com>"
+pkgname=firmware-xiaomi-jason
+pkgver=2
+pkgrel=0
+pkgdesc="Firmware files for Xiaomi Mi Note 3 (jason) - WiFi (WCN3990/ath10k_snoc) + Adreno 512 zap"
+url="https://postmarketos.org"
+arch="aarch64"
+license="proprietary"
+options="!strip !check !archcheck !spdx !tracedeps pmb:cross-native"
+
+# ath10k-fwencoder 由 qca-swiss-army-knife 提供
+makedepends="qca-swiss-army-knife"
+
+source="
+	board-data.bin
+	a512_zap.elf
+"
+
+builddir="$srcdir"
+
+_fwdir="/usr/lib/firmware"
+
+build() {
+	# 生成 WCN3990 的 ath10k firmware-5.bin（与所有 sdm660 设备相同 flags）
+	ath10k-fwencoder --create \
+		--features=wowlan,no-nwifi-decap-4addr-padding,allows-mesh-bcast,mgmt-tx-by-ref,non-bmi,single-chan-info-per-channel \
+		--set-wmi-op-version=tlv \
+		--set-htt-op-version=tlv \
+		--set-fw-api=5
+}
+
+package() {
+	# WiFi 固件
+	install -Dm644 firmware-5.bin \
+		"$pkgdir/$_fwdir/ath10k/WCN3990/hw1.0/firmware-5.bin"
+
+	# WiFi 板级数据（原厂 bdwlan.bin，ath10k 原始 board data 格式）
+	install -Dm644 board-data.bin \
+		"$pkgdir/$_fwdir/ath10k/WCN3990/hw1.0/board.bin"
+
+	# Adreno 512 zap 着色器（放进 postmarketos/ 目录，内核按此路径找）
+	install -Dm644 a512_zap.elf \
+		"$pkgdir/$_fwdir/postmarketos/a512_zap.mbn"
+}
+
+sha512sums="
+840e40530c209b8a266f60efb3751086eea334ce2d4b3fe4c97167cb16103f5792384416c22dd6d0dae4b3b11b355938876495f18d47ed165edd770e1f29b920  board-data.bin
+5775b04d191ab2b5de7183b6e971e08e45e5056952e7ec67c0e583933e1e918e7143abdc255829c1eb0da8767f9cd69c67cf854df9ade20ad9dbbf531293ce44  a512_zap.elf
+"
