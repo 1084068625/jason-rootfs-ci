@@ -1,0 +1,170 @@
+name: 2 - 构建 jason 完整系统（boot.img + rootfs）
+
+# 用途：在 GitHub 的服务器上，用 pmbootstrap 生成 Xiaomi Mi Note 3 (jason) 的
+#       可刷写镜像：boot.img（内核+initramfs）和 xiaomi-jason.img（完整系统）。
+# 产物：Actions 页面 → Artifacts → jason-rootfs-console
+#        里面是 boot-xiaomi-jason.img、rootfs-xiaomi-jason.img.xz、SHA256SUMS
+#
+# 说明：
+#   - 不需要本地有 Linux / Docker，全部在云端跑
+#   - 内核用官方 pmaports 的 linux-postmarketos-qcom-sdm660（已含 jason 设备树）
+#   - 只把我们自己的 3 个包（设备包 / 固件包 / USB 网络包）注入 pmaports
+#   - 工作目录放 /mnt（大盘），因为根分区只有约 14GB，装不下内核编译产物
+
+on:
+  workflow_dispatch:
+    inputs:
+      ui:
+        description: "界面（console = 纯命令行，推荐）"
+        default: "console"
+        required: true
+      password:
+        description: "系统默认登录密码"
+        default: "147147"
+        required: true
+      filesystem:
+        description: "根文件系统类型"
+        default: "ext4"
+        required: true
+        type: choice
+        options: [ext4, f2fs, btrfs, xfs]
+
+env:
+  PMB_VERSION: "3.12.1"
+  PMAPORTS_URL: "https://gitlab.postmarketos.org/nura/pmaports.git"
+  DEVICE: "xiaomi-jason"
+  PMB_WORK: "/mnt/pmb-work"
+  PMB_APORTS: "/mnt/pmaports-full"
+
+jobs:
+  build:
+    name: build-${{ inputs.ui }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 0. 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 1. 腾出磁盘空间（根分区只有约 14GB，必须清）
+        run: |
+          echo "--- 清理前 ---"; df -h / /mnt | sed 's/^/  /'
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo apt-get clean || true
+          echo "--- 清理后 ---"; df -h / /mnt | sed 's/^/  /'
+
+      - name: 2. 环境信息
+        run: |
+          echo "系统: $(head -1 /etc/os-release)"
+          echo "CPU 核数: $(nproc)"
+          echo "内存: $(free -h | awk '/Mem/{print $2}')"
+          sudo -n true && echo "sudo 免密: 可用" || echo "sudo 免密: 不可用"
+
+      - name: 3. 安装系统依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git python3 python3-venv python3-pip \
+            xz-utils file xxd \
+            android-sdk-libsparse-utils android-tools-adb android-tools-fastboot
+          echo "依赖安装完成"
+
+      - name: 4. 安装 pmbootstrap ${{ env.PMB_VERSION }}
+        run: |
+          git clone --depth 1 --branch "$PMB_VERSION" \
+            https://gitlab.postmarketos.org/nura/pmbootstrap.git
+          python3 -m venv "$PWD/pmb-venv"
+          "$PWD/pmb-venv/bin/pip" install -q --upgrade pip
+          "$PWD/pmb-venv/bin/pip" install -q "$PWD/pmbootstrap"
+          echo "$PWD/pmb-venv/bin" >> "$GITHUB_PATH"
+          "$PWD/pmb-venv/bin/pmbootstrap" --version
+
+      - name: 5. 准备 pmaports 并注入 jason 三个包
+        run: |
+          git clone --depth 1 "$PMAPORTS_URL" "$PMB_APORTS"
+          cp -r pmaports/device-xiaomi-jason \
+                pmaports/firmware-xiaomi-jason \
+                pmaports/usb-network-jason \
+                "$PMB_APORTS/device/testing/"
+          git -C "$PMB_APORTS" config user.email ci@example.com
+          git -C "$PMB_APORTS" config user.name ci
+          git -C "$PMB_APORTS" add -A
+          git -C "$PMB_APORTS" commit -m "inject jason device packages" >/dev/null
+          echo "--- device/testing 下的相关包 ---"
+          ls "$PMB_APORTS/device/testing" | grep -E "jason|sdm660" || true
+          echo "--- 官方内核包版本 ---"
+          grep -E "^pkgver=" "$PMB_APORTS/device/testing/linux-postmarketos-qcom-sdm660/APKBUILD" || true
+
+      - name: 6. 初始化 pmbootstrap 配置
+        run: |
+          pmbootstrap config work "$PMB_WORK"
+          pmbootstrap config aports "$PMB_APORTS"
+          yes "" | pmbootstrap --details-to-stdout init || true
+          pmbootstrap config work "$PMB_WORK"
+          pmbootstrap config aports "$PMB_APORTS"
+          pmbootstrap config device "$DEVICE"
+          pmbootstrap config ui "${{ inputs.ui }}"
+          pmbootstrap config build_pkgs_on_install true
+          echo "--- 最终配置 ---"
+          pmbootstrap config
+
+      - name: 7. 计算包校验值
+        run: |
+          pmbootstrap checksum \
+            firmware-xiaomi-jason \
+            usb-network-jason \
+            device-xiaomi-jason
+          echo "checksum 完成"
+
+      - name: 8. 先构建 3 个自定义包（快速暴露错误）
+        run: |
+          pmbootstrap --details-to-stdout build \
+            firmware-xiaomi-jason \
+            usb-network-jason \
+            device-xiaomi-jason
+          echo "自定义包构建成功"
+
+      - name: 9. 生成完整系统镜像（含内核编译，最慢的一步）
+        run: |
+          df -h / /mnt | sed 's/^/  /'
+          pmbootstrap --details-to-stdout install \
+            --password "${{ inputs.password }}" \
+            --filesystem "${{ inputs.filesystem }}"
+
+      - name: 10. 导出镜像并压缩
+        run: |
+          pmbootstrap export
+          EXPORT_DIR="/tmp/postmarketOS-export"
+          ls -lh "$EXPORT_DIR" || true
+          mkdir -p out
+          cp "$EXPORT_DIR/boot.img" out/boot-xiaomi-jason.img
+          cp "$EXPORT_DIR/${DEVICE}.img" out/rootfs-xiaomi-jason.img
+          echo "--- 产物 ---"
+          ls -lh out/
+          (cd out && sha256sum *.img > SHA256SUMS && cat SHA256SUMS)
+          echo "--- boot.img 文件头（1f 8b = gzip；ANDROID! = 已打包）---"
+          file out/boot-xiaomi-jason.img
+          echo "--- 压缩 rootfs ---"
+          xz -T0 -6 -v out/rootfs-xiaomi-jason.img
+          ls -lh out/
+          df -h / | sed 's/^/  /'
+
+      - name: 11. 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: jason-rootfs-${{ inputs.ui }}
+          path: out/*
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 12. 失败时输出诊断日志
+        if: failure()
+        run: |
+          echo "===================== pmbootstrap log ====================="
+          pmbootstrap log -n 200 2>&1 | tail -150 || true
+          echo "===================== 工作区 ====================="
+          ls -la "$PMB_WORK" 2>/dev/null || true
+          du -sh "$PMB_WORK"/* 2>/dev/null | sort -h | tail -10 || true
+          echo "===================== 磁盘 ====================="
+          df -h / /mnt || true
